@@ -90,8 +90,54 @@ func goDetectVerboseFlag() string {
 	return fmt.Sprintf("-v=%t", mg.Verbose())
 }
 
+// resolveGitDir returns the absolute path to the .git directory.
+// In a worktree, .git is a file containing "gitdir: /absolute/path" instead of a directory.
+// This function resolves that path, making git commands work inside worktrees.
+func resolveGitDir() (string, error) {
+	gitFileOrDir := ".git"
+
+	// Check if .git is a file (worktree) or directory (regular clone)
+	info, err := os.Stat(gitFileOrDir)
+	if err != nil {
+		return "", fmt.Errorf(".git not found: %w", err)
+	}
+
+	if info.IsDir() {
+		// Regular .git directory
+		return filepath.Abs(gitFileOrDir)
+	}
+
+	// .git is a file in a worktree
+	content, err := os.ReadFile(gitFileOrDir)
+	if err != nil {
+		return "", fmt.Errorf("error reading .git file: %w", err)
+	}
+
+	// Expected format: "gitdir: /path/to/main/.git/worktrees/worktreename\n"
+	line := strings.TrimSpace(string(content))
+	if !strings.HasPrefix(line, "gitdir: ") {
+		return "", fmt.Errorf(".git file has unexpected format: %s", line)
+	}
+
+	gitdirPath := strings.TrimPrefix(line, "gitdir: ")
+	gitDir := filepath.Dir(filepath.Dir(gitdirPath))
+
+	if _, err := os.Stat(gitDir); err != nil {
+		return "", fmt.Errorf("gitdir does not exist: %s: %w", gitDir, err)
+	}
+
+	return gitDir, nil
+}
+
 func runGitCommandWithOutput(ctx context.Context, arg ...string) (output []byte, err error) {
 	cmd := exec.CommandContext(ctx, "git", arg...)
+
+	// In a worktree, set GIT_DIR to the main repository to make git commands work.
+	gitDir, err := resolveGitDir()
+	if err == nil {
+		cmd.Env = append(os.Environ(), "GIT_DIR="+gitDir)
+	}
+
 	output, err = cmd.Output()
 	if err != nil {
 		var ee *exec.ExitError
